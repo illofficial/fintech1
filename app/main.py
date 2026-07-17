@@ -116,8 +116,7 @@ def create_app() -> FastAPI:
         
         # Check OpenAI
         try:
-            client = request.app.state.openai_client
-            # Simple test call (optional)
+            _ = request.app.state.openai_client  # или просто проверяем наличие
             status["services"]["openai"] = "healthy"
         except Exception as e:
             status["services"]["openai"] = f"unhealthy: {str(e)}"
