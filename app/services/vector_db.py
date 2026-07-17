@@ -3,6 +3,7 @@ import logging
 import math
 import os
 import re
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
@@ -24,6 +25,8 @@ from qdrant_client.models import (
 
 from app.models.rag import RAGConfig, RetrieveContextRequest, ScoredDocument
 from app.services.retry import retry_on_rate_limit
+
+from typing import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -220,7 +223,7 @@ class MockVectorStore(VectorStoreBackend):
 
     async def _search(
         self,
-        scorer: callable,
+        scorer: Callable,
         source: str,
         limit: int,
     ) -> list[ScoredDocument]:
