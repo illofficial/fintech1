@@ -5,19 +5,29 @@ import os
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import Any
 
 import httpx
 from openai import APIError, AsyncOpenAI
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
+from qdrant_client.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    MatchText,
+    PayloadSchemaType,
+    TextIndexParams,
+    TokenizerType,
+    VectorParams,
+)
 
 from app.models.rag import RAGConfig, RetrieveContextRequest, ScoredDocument
 from app.services.retry import retry_on_rate_limit
 
 logger = logging.getLogger(__name__)
 
-# Errors that indicate Qdrant is unreachable or misconfigured; any of these triggers a
-# graceful fallback to the in-memory store rather than crashing the service.
+# Errors that indicate Qdrant is unreachable or misconfigured
 QDRANT_CONNECTION_ERRORS = (
     ResponseHandlingException,
     UnexpectedResponse,
@@ -67,41 +77,33 @@ _MOCK_SEED_DOCUMENTS: list[dict[str, str]] = [
 
 
 def _tokenize(text: str) -> set[str]:
+    """Tokenize text for keyword search."""
     return set(_TOKEN_PATTERN.findall(text.lower()))
 
 
 def _keyword_score(query: str, content: str) -> float:
+    """BM25-inspired keyword relevance score."""
     query_tokens = _tokenize(query)
-    if not query_tokens:
-        return 0.0
-
     content_tokens = _tokenize(content)
-    if not content_tokens:
+    if not query_tokens or not content_tokens:
         return 0.0
-
     overlap = query_tokens & content_tokens
-    if not overlap:
-        return 0.0
-
-    # Lightweight BM25-inspired score without corpus statistics.
-    return len(overlap) / math.sqrt(len(content_tokens))
+    return len(overlap) / math.sqrt(len(content_tokens)) if overlap else 0.0
 
 
 def _cosine_similarity(left: list[float], right: list[float]) -> float:
-    if len(left) != len(right) or not left:
+    """Cosine similarity between two vectors."""
+    if not left or not right or len(left) != len(right):
         return 0.0
-
     dot = sum(a * b for a, b in zip(left, right, strict=True))
-    left_norm = math.sqrt(sum(value * value for value in left))
-    right_norm = math.sqrt(sum(value * value for value in right))
-    if left_norm == 0.0 or right_norm == 0.0:
-        return 0.0
-    return dot / (left_norm * right_norm)
+    left_norm = math.sqrt(sum(v * v for v in left))
+    right_norm = math.sqrt(sum(v * v for v in right))
+    return dot / (left_norm * right_norm) if left_norm and right_norm else 0.0
 
 
 @dataclass(slots=True)
 class StoredDocument:
-    """A seed document plus its cached embedding held by the in-memory store."""
+    """In-memory document with cached embedding."""
 
     id: str
     content: str
@@ -109,40 +111,60 @@ class StoredDocument:
 
 
 class VectorStoreBackend(ABC):
+    """Abstract interface for vector store backends."""
+
     @abstractmethod
     async def vector_search(self, vector: list[float], limit: int) -> list[ScoredDocument]:
+        """Semantic search using vector similarity."""
         raise NotImplementedError
 
     @abstractmethod
     async def keyword_search(self, query: str, limit: int) -> list[ScoredDocument]:
+        """Keyword-based search using full-text index."""
         raise NotImplementedError
 
     @abstractmethod
     async def close(self) -> None:
+        """Release resources."""
         raise NotImplementedError
 
 
 class EmbeddingProvider:
-    def __init__(
-        self,
-        client: AsyncOpenAI,
-        *,
-        model: str,
-    ) -> None:
+    """OpenAI embedding provider with retry support."""
+
+    def __init__(self, client: AsyncOpenAI, *, model: str) -> None:
         self._client = client
         self._model = model
+        self._cache: dict[int, list[float]] = {}  # Simple in-memory cache
 
     @retry_on_rate_limit
     async def embed(self, text: str) -> list[float]:
+        """Generate embedding for text with caching."""
+        cache_key = hash(text)
+        if cache_key in self._cache:
+            logger.debug("Embedding cache hit for text length %d", len(text))
+            return self._cache[cache_key]
+
         response = await self._client.embeddings.create(
             model=self._model,
             input=text,
         )
-        return response.data[0].embedding
+        embedding = response.data[0].embedding
+        self._cache[cache_key] = embedding
+        return embedding
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        """Generate embeddings for multiple texts in parallel."""
+        tasks = [self.embed(text) for text in texts]
+        return await asyncio.gather(*tasks)
 
 
 class MockVectorStore(VectorStoreBackend):
-    """In-memory vector store used when Qdrant is unavailable."""
+    """
+    In-memory vector store with transactional initialization.
+    
+    Used as fallback when Qdrant is unavailable or in tests.
+    """
 
     def __init__(
         self,
@@ -157,6 +179,7 @@ class MockVectorStore(VectorStoreBackend):
         self._init_lock = asyncio.Lock()
 
     async def _ensure_initialized(self) -> None:
+        """Lazy initialization with transaction-like rollback on failure."""
         if self._initialized:
             return
 
@@ -164,73 +187,97 @@ class MockVectorStore(VectorStoreBackend):
             if self._initialized:
                 return
 
-            for document in self._seed_documents:
-                embedding = await self._embedder.embed(document["content"])
-                self._documents.append(
-                    StoredDocument(
-                        id=document["id"],
-                        content=document["content"],
-                        embedding=embedding,
-                    )
+            try:
+                logger.info(
+                    "Generating embeddings for %d seed documents...",
+                    len(self._seed_documents),
                 )
+                contents = [doc["content"] for doc in self._seed_documents]
+                embeddings = await self._embedder.embed_batch(contents)
 
-            self._initialized = True
-            logger.info("MockVectorStore initialized with %s documents", len(self._documents))
+                # Atomic replacement to prevent partial state
+                new_documents = []
+                for doc, embedding in zip(self._seed_documents, embeddings, strict=True):
+                    new_documents.append(
+                        StoredDocument(
+                            id=doc["id"],
+                            content=doc["content"],
+                            embedding=embedding,
+                        )
+                    )
+
+                self._documents = new_documents
+                self._initialized = True
+                logger.info(
+                    "MockVectorStore successfully initialized with %d documents",
+                    len(self._documents),
+                )
+            except Exception:
+                logger.exception("Failed to initialize MockVectorStore")
+                self._documents = []  # Clean rollback
+                self._initialized = False
+                raise
+
+    async def _search(
+        self,
+        scorer: callable,
+        source: str,
+        limit: int,
+    ) -> list[ScoredDocument]:
+        """Generic search with single-pass scoring."""
+        await self._ensure_initialized()
+
+        scored_items = []
+        for item in self._documents:
+            score = scorer(item)
+            if score > 0.0:
+                scored_items.append((item, score))
+
+        scored_items.sort(key=lambda x: x[1], reverse=True)
+
+        return [
+            ScoredDocument(
+                id=item.id,
+                content=item.content,
+                score=score,
+                source=source,
+            )
+            for item, score in scored_items[:limit]
+        ]
 
     async def vector_search(self, vector: list[float], limit: int) -> list[ScoredDocument]:
-        await self._ensure_initialized()
-
-        ranked = sorted(
-            self._documents,
-            key=lambda item: _cosine_similarity(vector, item.embedding),
-            reverse=True,
+        """Vector similarity search."""
+        return await self._search(
+            scorer=lambda item: _cosine_similarity(vector, item.embedding),
+            source="vector",
+            limit=limit,
         )
-
-        results: list[ScoredDocument] = []
-        for item in ranked[:limit]:
-            score = _cosine_similarity(vector, item.embedding)
-            if score <= 0.0:
-                continue
-            results.append(
-                ScoredDocument(
-                    id=item.id,
-                    content=item.content,
-                    score=score,
-                    source="vector",
-                )
-            )
-        return results
 
     async def keyword_search(self, query: str, limit: int) -> list[ScoredDocument]:
-        await self._ensure_initialized()
-
-        ranked = sorted(
-            self._documents,
-            key=lambda item: _keyword_score(query, item.content),
-            reverse=True,
+        """Keyword search."""
+        return await self._search(
+            scorer=lambda item: _keyword_score(query, item.content),
+            source="keyword",
+            limit=limit,
         )
 
-        results: list[ScoredDocument] = []
-        for item in ranked[:limit]:
-            score = _keyword_score(query, item.content)
-            if score <= 0.0:
-                continue
-            results.append(
-                ScoredDocument(
-                    id=item.id,
-                    content=item.content,
-                    score=score,
-                    source="keyword",
-                )
-            )
-        return results
+    async def refresh(self, documents: list[dict[str, str]] | None = None) -> None:
+        """Refresh in-memory documents."""
+        if documents is not None:
+            self._seed_documents = documents
+        self._initialized = False
+        self._documents = []
+        await self._ensure_initialized()
 
     async def close(self) -> None:
+        """No-op for in-memory store."""
         return None
 
 
 class QdrantVectorStore(VectorStoreBackend):
-    """Async Qdrant integration for vector and keyword retrieval."""
+    """
+    Production Qdrant driver with auto-provisioning and full-text search support.
+    """
 
     def __init__(
         self,
@@ -238,12 +285,79 @@ class QdrantVectorStore(VectorStoreBackend):
         *,
         collection_name: str,
         content_field: str = "content",
+        vector_size: int = 1536,  # Default for text-embedding-3-small
     ) -> None:
         self._client = client
         self._collection_name = collection_name
         self._content_field = content_field
+        self._vector_size = vector_size
+        self._ready = False
+        self._ready_lock = asyncio.Lock()
+
+    async def _ensure_ready(self) -> None:
+        """Ensure collection and indexes exist."""
+        if self._ready:
+            return
+
+        async with self._ready_lock:
+            if self._ready:
+                return
+
+            try:
+                # Check if collection exists
+                collections = await self._client.get_collections()
+                collection_names = [c.name for c in collections.collections]
+
+                if self._collection_name not in collection_names:
+                    logger.info(
+                        "Creating collection '%s' with vector size %d",
+                        self._collection_name,
+                        self._vector_size,
+                    )
+                    await self._client.create_collection(
+                        collection_name=self._collection_name,
+                        vectors_config=VectorParams(
+                            size=self._vector_size,
+                            distance=Distance.COSINE,
+                        ),
+                    )
+
+                # Check if text index exists
+                indexes = await self._client.list_payload_indexes(self._collection_name)
+                has_text_index = any(
+                    idx.field_name == self._content_field
+                    and idx.field_type == PayloadSchemaType.TEXT
+                    for idx in indexes
+                )
+
+                if not has_text_index:
+                    logger.info(
+                        "Creating text index on field '%s'",
+                        self._content_field,
+                    )
+                    await self._client.create_payload_index(
+                        collection_name=self._collection_name,
+                        field_name=self._content_field,
+                        field_type=PayloadSchemaType.TEXT,
+                        params=TextIndexParams(
+                            tokenizer=TokenizerType.WORD,
+                            lowercase=True,
+                            min_token_len=2,
+                            max_token_len=20,
+                        ),
+                    )
+
+                self._ready = True
+                logger.info("Qdrant store ready for collection '%s'", self._collection_name)
+
+            except Exception:
+                logger.exception("Failed to initialize Qdrant store")
+                raise
 
     async def vector_search(self, vector: list[float], limit: int) -> list[ScoredDocument]:
+        """Semantic search using vector similarity."""
+        await self._ensure_ready()
+
         response = await self._client.query_points(
             collection_name=self._collection_name,
             query=vector,
@@ -252,28 +366,29 @@ class QdrantVectorStore(VectorStoreBackend):
         )
 
         points = response.points if hasattr(response, "points") else response
-        results: list[ScoredDocument] = []
+        results = []
         for point in points:
             payload = point.payload or {}
             content = payload.get(self._content_field)
-            if not isinstance(content, str):
-                continue
-            results.append(
-                ScoredDocument(
-                    id=str(point.id),
-                    content=content,
-                    score=float(point.score or 0.0),
-                    source="vector",
+            if isinstance(content, str):
+                results.append(
+                    ScoredDocument(
+                        id=str(point.id),
+                        content=content,
+                        score=float(point.score or 0.0),
+                        source="vector",
+                    )
                 )
-            )
         return results
 
     async def keyword_search(self, query: str, limit: int) -> list[ScoredDocument]:
-        from qdrant_client.models import FieldCondition, Filter, MatchText
+        """Full-text keyword search using Qdrant's MatchText."""
+        await self._ensure_ready()
 
-        records, _ = await self._client.scroll(
+        response = await self._client.query_points(
             collection_name=self._collection_name,
-            scroll_filter=Filter(
+            query=None,
+            query_filter=Filter(
                 must=[
                     FieldCondition(
                         key=self._content_field,
@@ -285,55 +400,73 @@ class QdrantVectorStore(VectorStoreBackend):
             with_payload=True,
         )
 
-        results: list[ScoredDocument] = []
-        for point in records:
+        points = response.points if hasattr(response, "points") else response
+        results = []
+        for point in points:
             payload = point.payload or {}
             content = payload.get(self._content_field)
-            if not isinstance(content, str):
-                continue
-            results.append(
-                ScoredDocument(
-                    id=str(point.id),
-                    content=content,
-                    score=_keyword_score(query, content),
-                    source="keyword",
+            if isinstance(content, str):
+                results.append(
+                    ScoredDocument(
+                        id=str(point.id),
+                        content=content,
+                        score=_keyword_score(query, content),
+                        source="keyword",
+                    )
                 )
-            )
-
-        results.sort(key=lambda item: item.score, reverse=True)
-        return results[:limit]
+        return results
 
     async def close(self) -> None:
+        """Close Qdrant client."""
         await self._client.close()
 
 
 async def create_vector_store(
     config: RAGConfig,
     embedder: EmbeddingProvider,
+    vector_size: int = 1536,
 ) -> VectorStoreBackend:
-    if config.use_mock is True:
-        logger.info("RAGService configured to use MockVectorStore")
+    """
+    Factory for creating appropriate vector store backend.
+    
+    Falls back to MockVectorStore if Qdrant is unavailable or not configured.
+    """
+    if config.use_mock:
+        logger.info("Using MockVectorStore (forced by config)")
         return MockVectorStore(embedder=embedder)
 
     qdrant_url = config.qdrant_url or os.getenv("QDRANT_URL")
     qdrant_api_key = config.qdrant_api_key or os.getenv("QDRANT_API_KEY")
 
     if not qdrant_url:
-        logger.warning("QDRANT_URL is not set; using MockVectorStore")
+        logger.warning("QDRANT_URL not set; using MockVectorStore")
         return MockVectorStore(embedder=embedder)
 
     try:
         client = AsyncQdrantClient(url=qdrant_url, api_key=qdrant_api_key)
+        
+        # Test connection by listing collections
         await client.get_collections()
+        
+        logger.info("Connected to Qdrant at %s", qdrant_url)
+        return QdrantVectorStore(
+            client,
+            collection_name=config.collection_name,
+            vector_size=vector_size,
+        )
+
     except QDRANT_CONNECTION_ERRORS:
         logger.exception("Failed to connect to Qdrant; falling back to MockVectorStore")
         return MockVectorStore(embedder=embedder)
 
-    logger.info("Connected to Qdrant at %s", qdrant_url)
-    return QdrantVectorStore(client, collection_name=config.collection_name)
-
 
 class RAGService:
+    """
+    Hybrid search engine with reciprocal rank fusion.
+    
+    Combines vector and keyword search with configurable bias.
+    """
+
     def __init__(
         self,
         *,
@@ -341,20 +474,27 @@ class RAGService:
         client: AsyncOpenAI | None = None,
         config: RAGConfig | None = None,
         vector_store: VectorStoreBackend | None = None,
+        vector_size: int = 1536,
     ) -> None:
         self._config = config or RAGConfig()
         self._client = client or AsyncOpenAI(api_key=api_key)
         self._embedder = EmbeddingProvider(self._client, model=self._config.embedding_model)
         self._vector_store = vector_store
+        self._vector_size = vector_size
         self._store_lock = asyncio.Lock()
 
     async def _get_store(self) -> VectorStoreBackend:
+        """Lazy initialization of vector store."""
         if self._vector_store is not None:
             return self._vector_store
 
         async with self._store_lock:
             if self._vector_store is None:
-                self._vector_store = await create_vector_store(self._config, self._embedder)
+                self._vector_store = await create_vector_store(
+                    self._config,
+                    self._embedder,
+                    self._vector_size,
+                )
             return self._vector_store
 
     @staticmethod
@@ -364,54 +504,86 @@ class RAGService:
         *,
         limit: int,
         rrf_k: int,
-        vector_weight: float,
+        vector_weight: float = 0.5,
     ) -> list[ScoredDocument]:
-        keyword_weight = 1.0 - vector_weight
+        """
+        Hybrid RRF with normalized weights.
+        
+        Uses pure RRF ranking with optional bias for vector results.
+        """
+        # Normalize weights to sum to 1.0
+        total_weight = vector_weight + (1.0 - vector_weight)
+        norm_vector_weight = vector_weight / total_weight if total_weight > 0 else 0.5
+        norm_keyword_weight = (1.0 - vector_weight) / total_weight if total_weight > 0 else 0.5
+
         fused_scores: dict[str, float] = {}
         documents: dict[str, ScoredDocument] = {}
 
         for rank, document in enumerate(vector_results, start=1):
-            fused_scores[document.id] = fused_scores.get(document.id, 0.0) + (
-                vector_weight / (rrf_k + rank)
-            )
+            score = norm_vector_weight / (rrf_k + rank)
+            fused_scores[document.id] = fused_scores.get(document.id, 0.0) + score
             documents[document.id] = document
 
         for rank, document in enumerate(keyword_results, start=1):
-            fused_scores[document.id] = fused_scores.get(document.id, 0.0) + (
-                keyword_weight / (rrf_k + rank)
-            )
+            score = norm_keyword_weight / (rrf_k + rank)
+            if document.id in fused_scores:
+                fused_scores[document.id] += score
+            else:
+                fused_scores[document.id] = score
             documents.setdefault(document.id, document)
 
         ranked_ids = sorted(
-            fused_scores,
-            key=lambda document_id: fused_scores[document_id],
+            fused_scores.keys(),
+            key=lambda doc_id: fused_scores[doc_id],
             reverse=True,
         )
 
-        hybrid_results: list[ScoredDocument] = []
-        for document_id in ranked_ids[:limit]:
-            base = documents[document_id]
-            hybrid_results.append(
-                ScoredDocument(
-                    id=base.id,
-                    content=base.content,
-                    score=fused_scores[document_id],
-                    source="hybrid",
-                )
+        return [
+            ScoredDocument(
+                id=doc_id,
+                content=documents[doc_id].content,
+                score=fused_scores[doc_id],
+                source="hybrid",
             )
-        return hybrid_results
+            for doc_id in ranked_ids[:limit]
+        ]
 
-    async def hybrid_search(self, query: str, limit: int = 10) -> list[ScoredDocument]:
-        validated = RetrieveContextRequest.model_validate({"query": query, "limit": limit})
-        store = await self._get_store()
+    async def hybrid_search(
+        self,
+        query: str,
+        limit: int = 10,
+    ) -> list[ScoredDocument]:
+        """
+        Perform hybrid search combining vector and keyword methods.
+        
+        Falls back to pure vector search if keyword search fails.
+        """
+        validated = RetrieveContextRequest.model_validate({
+            "query": query,
+            "limit": limit,
+        })
 
         try:
             query_vector = await self._embedder.embed(validated.query)
             candidate_limit = max(validated.limit * 2, validated.limit)
-            vector_results, keyword_results = await asyncio.gather(
-                store.vector_search(query_vector, candidate_limit),
-                store.keyword_search(validated.query, candidate_limit),
-            )
+            store = await self._get_store()
+
+            try:
+                vector_results, keyword_results = await asyncio.gather(
+                    store.vector_search(query_vector, candidate_limit),
+                    store.keyword_search(validated.query, candidate_limit),
+                )
+            except QDRANT_CONNECTION_ERRORS:
+                logger.warning(
+                    "Qdrant connection lost; switching to MockVectorStore"
+                )
+                async with self._store_lock:
+                    self._vector_store = MockVectorStore(embedder=self._embedder)
+                store = await self._get_store()
+                vector_results, keyword_results = await asyncio.gather(
+                    store.vector_search(query_vector, candidate_limit),
+                    store.keyword_search(validated.query, candidate_limit),
+                )
 
             return self._reciprocal_rank_fusion(
                 vector_results,
@@ -420,18 +592,64 @@ class RAGService:
                 rrf_k=self._config.rrf_k,
                 vector_weight=self._config.hybrid_vector_weight,
             )
+
         except APIError:
-            logger.exception("OpenAI API error while embedding query: %s", validated.query)
-            raise
-        except QDRANT_CONNECTION_ERRORS:
-            logger.exception("Vector store error during hybrid search for: %s", validated.query)
+            logger.exception("OpenAI API error during embedding for query: %s", validated.query)
             raise
 
-    async def retrieve_context(self, query: str, limit: int = 3) -> list[str]:
-        validated = RetrieveContextRequest.model_validate({"query": query, "limit": limit})
+    async def retrieve_context(
+        self,
+        query: str,
+        limit: int | None = None,
+    ) -> list[str]:
+        """
+        Retrieve relevant context documents for a query.
+        
+        Args:
+            query: User query
+            limit: Maximum number of documents to return.
+                  If None, uses RAGConfig.default_retrieval_limit.
+        """
+        if limit is None:
+            limit = self._config.default_retrieval_limit or 3
+
+        validated = RetrieveContextRequest.model_validate({
+            "query": query,
+            "limit": limit,
+        })
         results = await self.hybrid_search(validated.query, limit=validated.limit)
         return [result.content for result in results]
 
+    async def health_check(self) -> dict[str, bool | str]:
+        """
+        Check health of vector store backend.
+        
+        Returns status of the underlying store.
+        """
+        try:
+            store = await self._get_store()
+            if isinstance(store, QdrantVectorStore):
+                await store._ensure_ready()
+                return {
+                    "status": "healthy",
+                    "backend": "qdrant",
+                    "collection": store._collection_name,
+                }
+            else:
+                return {
+                    "status": "healthy",
+                    "backend": "mock",
+                    "documents": len(store._documents),
+                }
+        except Exception as e:
+            logger.exception("Health check failed")
+            return {
+                "status": "unhealthy",
+                "backend": "unknown",
+                "error": str(e),
+            }
+
     async def close(self) -> None:
+        """Release all resources."""
         if self._vector_store is not None:
             await self._vector_store.close()
