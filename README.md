@@ -29,7 +29,7 @@ app/
 `StreamingResponse`. Both services are injected with `Depends` and share a single
 `AsyncOpenAI` client created during startup.
 
-### Safety & performance notes
+### Safety & performance note
 
 - **Prompt caching** — the static system instructions are a module-level constant sent as
   the *first* message on every request, so identical prefixes can be cached upstream.
