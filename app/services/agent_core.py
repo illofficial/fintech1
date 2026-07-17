@@ -64,7 +64,7 @@ TOOLS: list[ChatCompletionToolParam] = [GET_FINTECH_TRANSACTIONS_TOOL]
 async def default_fintech_db_lookup(query: FintechTransactionQuery) -> list[TransactionRecord]:
     """
     Mock backend simulation for testing and demonstration purposes.
-    
+
     WARNING: This is for development/testing only. In production, a real
     database lookup handler must be provided to AgentOrchestrator.
     """
@@ -110,7 +110,7 @@ async def default_fintech_db_lookup(query: FintechTransactionQuery) -> list[Tran
 class AgentOrchestrator:
     """
     Runs a resilient, unified tool-calling loop for fintech agent reasoning.
-    
+
     The orchestrator only performs tool reasoning; streaming the final natural-language
     answer is delegated to LLMService, keeping the two services decoupled.
     """
@@ -125,7 +125,7 @@ class AgentOrchestrator:
     ) -> None:
         """
         Initialize the agent orchestrator.
-        
+
         Args:
             client: AsyncOpenAI client instance
             model: OpenAI model to use for chat completions
@@ -136,7 +136,7 @@ class AgentOrchestrator:
         self._client = client
         self._model = model
         self._max_iterations = max_iterations
-        
+
         # In production, fintech_lookup must be provided
         if fintech_lookup is None:
             logger.warning(
@@ -146,7 +146,7 @@ class AgentOrchestrator:
             self._fintech_lookup = default_fintech_db_lookup
         else:
             self._fintech_lookup = fintech_lookup
-            
+
         self._tool_handlers: dict[str, tuple[type[FintechTransactionQuery], ToolHandler]] = {
             "get_fintech_transactions": (FintechTransactionQuery, self._fintech_lookup),
         }
@@ -193,7 +193,7 @@ class AgentOrchestrator:
     async def _execute_tool(self, tool_name: str, raw_arguments: str) -> str:
         """
         Execute a tool with graceful error handling.
-        
+
         Returns a JSON string that can be parsed by the model.
         """
         handler_entry = self._tool_handlers.get(tool_name)
@@ -211,14 +211,16 @@ class AgentOrchestrator:
                 tool_name,
                 exc,
             )
-            return json.dumps({
-                "error": "Invalid tool arguments",
-                "details": exc.errors(),
-            })
+            return json.dumps(
+                {
+                    "error": "Invalid tool arguments",
+                    "details": exc.errors(),
+                }
+            )
 
         try:
             records = await handler(validated_args)
-            
+
             # Defend context window against massive database outputs
             if len(records) > MAX_TRANSACTIONS_PER_RESPONSE:
                 logger.warning(
@@ -227,13 +229,11 @@ class AgentOrchestrator:
                     MAX_TRANSACTIONS_PER_RESPONSE,
                 )
                 records = records[:MAX_TRANSACTIONS_PER_RESPONSE]
-                
-            return json.dumps({
-                "transactions": [
-                    record.model_dump(mode="json") for record in records
-                ]
-            })
-            
+
+            return json.dumps(
+                {"transactions": [record.model_dump(mode="json") for record in records]}
+            )
+
         except Exception as exc:
             # Log with critical level to ensure we don't miss database issues
             logger.critical(
@@ -242,9 +242,9 @@ class AgentOrchestrator:
                 exc,
                 exc_info=True,
             )
-            return json.dumps({
-                "error": "Database is temporarily unavailable. Please try again later."
-            })
+            return json.dumps(
+                {"error": "Database is temporarily unavailable. Please try again later."}
+            )
 
     async def _apply_tool_calls(
         self,
@@ -253,8 +253,8 @@ class AgentOrchestrator:
     ) -> None:
         """Execute all tool calls from an assistant message."""
         messages.append(self._assistant_param(assistant_message))
-        
-        for tool_call in (assistant_message.tool_calls or []):
+
+        for tool_call in assistant_message.tool_calls or []:
             tool_result = await self._execute_tool(
                 tool_call.function.name,
                 tool_call.function.arguments,
@@ -272,10 +272,10 @@ class AgentOrchestrator:
     ) -> tuple[list[ChatCompletionMessageParam], ChatCompletion, int]:
         """
         Unified execution loop ensuring DRY compliance across public APIs.
-        
+
         Returns:
             Tuple of (final_messages, completion, iterations_used)
-            
+
         Raises:
             MaxIterationsExceededError: When loop exceeds max_iterations
             APIError: When OpenAI API fails
@@ -284,14 +284,14 @@ class AgentOrchestrator:
             "Starting agent execution loop (max_iterations=%d)",
             self._max_iterations,
         )
-        
+
         for iteration in range(self._max_iterations):
             logger.debug(
                 "Running loop iteration %d/%d",
                 iteration + 1,
                 self._max_iterations,
             )
-            
+
             try:
                 completion = await self._create_completion(messages)
             except APIError:
@@ -299,17 +299,16 @@ class AgentOrchestrator:
                 raise
 
             assistant_message = completion.choices[0].message
-            
+
             # Check if the model wants to call tools
             if not assistant_message.tool_calls:
                 # Validate that we have content if no tool calls
                 if assistant_message.content is None:
                     logger.warning(
-                        "Anomaly: OpenAI returned empty content and no tool calls "
-                        "at iteration %d",
+                        "Anomaly: OpenAI returned empty content and no tool calls at iteration %d",
                         iteration,
                     )
-                
+
                 logger.info(
                     "Agent loop completed successfully after %d iterations",
                     iteration + 1,
@@ -333,11 +332,11 @@ class AgentOrchestrator:
     ) -> list[ChatCompletionMessageParam]:
         """
         Resolve tools and return message history ready for streaming downstream.
-        
+
         Args:
             message: User message
             system_prompt: Optional custom system prompt
-            
+
         Returns:
             List of message parameters ready for LLMService
         """
@@ -351,10 +350,10 @@ class AgentOrchestrator:
     async def run(self, request: AgentRequest | str) -> AgentResponse:
         """
         Run the tool loop and return the final complete message response.
-        
+
         Args:
             request: AgentRequest object or string query
-            
+
         Returns:
             AgentResponse with final answer and metadata
         """
@@ -364,19 +363,19 @@ class AgentOrchestrator:
             if isinstance(request, str)
             else AgentRequest.model_validate(request)
         )
-        
+
         # Build initial messages with user's system prompt
         messages: list[ChatCompletionMessageParam] = [
             {"role": "system", "content": validated.system_prompt},
             {"role": "user", "content": validated.query},
         ]
-        
+
         # Run the tool loop
         _, completion, iterations = await self._run_tool_loop(messages)
-        
+
         # Extract the final response
         choice = completion.choices[0]
-        
+
         return AgentResponse(
             content=choice.message.content or "",
             model=completion.model,

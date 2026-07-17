@@ -1,14 +1,17 @@
 from typing import Literal, Self
+
 from pydantic import BaseModel, Field, model_validator
+
 from app.models.types import FinishReason
+
 
 class ChatMessage(BaseModel):
     """
     A single message in a chat conversation.
-    
+
     Supports system, user, assistant, and tool messages with metadata
     for function calling.
-    
+
     Examples:
         >>> msg = ChatMessage(
         ...     role="user",
@@ -64,7 +67,7 @@ class ChatMessage(BaseModel):
 class TokenUsage(BaseModel):
     """
     Token usage statistics for an LLM request.
-    
+
     Used for cost monitoring and optimization.
     """
 
@@ -85,9 +88,9 @@ class TokenUsage(BaseModel):
 class LLMRequest(BaseModel):
     """
     Request to the LLM service.
-    
+
     Supports system, user, assistant, and tool messages with full metadata.
-    
+
     Examples:
         >>> request = LLMRequest(
         ...     messages=[
@@ -128,17 +131,16 @@ class LLMRequest(BaseModel):
     def __repr__(self) -> str:
         """Human-readable representation for debugging."""
         return (
-            f"<LLMRequest model={self.model} "
-            f"messages={len(self.messages)} temp={self.temperature}>"
+            f"<LLMRequest model={self.model} messages={len(self.messages)} temp={self.temperature}>"
         )
 
 
 class LLMResponse(BaseModel):
     """
     Response from the LLM service.
-    
+
     Contains the generated content, model info, and token usage.
-    
+
     Examples:
         >>> response = LLMResponse(
         ...     content="Hello! How can I help you today?",

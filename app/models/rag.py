@@ -1,12 +1,14 @@
-from typing import Literal, Self
-from pydantic import BaseModel, Field, model_validator
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
 
 class ScoredDocument(BaseModel):
     """
     A document with relevance score from a retrieval operation.
-    
+
     Contains the document content, similarity score, and search source.
-    
+
     Examples:
         >>> doc = ScoredDocument(
         ...     id="doc-001",
@@ -56,9 +58,9 @@ class ScoredDocument(BaseModel):
 class RAGConfig(BaseModel):
     """
     Configuration for the RAG (Retrieval-Augmented Generation) service.
-    
+
     Controls vector store, embedding model, and hybrid search parameters.
-    
+
     Examples:
         >>> config = RAGConfig(
         ...     collection_name="fintech_docs",
@@ -103,8 +105,7 @@ class RAGConfig(BaseModel):
         ge=0.0,
         le=1.0,
         description=(
-            "Weight for vector search in hybrid scoring "
-            "(0.0 = keyword only, 1.0 = vector only)"
+            "Weight for vector search in hybrid scoring (0.0 = keyword only, 1.0 = vector only)"
         ),
         examples=[0.7, 0.8, 1.0],
     )
@@ -127,9 +128,9 @@ class RAGConfig(BaseModel):
 class RetrieveContextRequest(BaseModel):
     """
     Request to retrieve context documents for a query.
-    
+
     Used by the RAG service to fetch relevant documents.
-    
+
     Examples:
         >>> request = RetrieveContextRequest(
         ...     query="What are the AML requirements?",

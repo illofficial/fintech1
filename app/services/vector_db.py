@@ -6,7 +6,6 @@ import re
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
 
 import httpx
 from openai import APIError, AsyncOpenAI
@@ -165,7 +164,7 @@ class EmbeddingProvider:
 class MockVectorStore(VectorStoreBackend):
     """
     In-memory vector store with transactional initialization.
-    
+
     Used as fallback when Qdrant is unavailable or in tests.
     """
 
@@ -431,7 +430,7 @@ async def create_vector_store(
 ) -> VectorStoreBackend:
     """
     Factory for creating appropriate vector store backend.
-    
+
     Falls back to MockVectorStore if Qdrant is unavailable or not configured.
     """
     if config.use_mock:
@@ -447,10 +446,10 @@ async def create_vector_store(
 
     try:
         client = AsyncQdrantClient(url=qdrant_url, api_key=qdrant_api_key)
-        
+
         # Test connection by listing collections
         await client.get_collections()
-        
+
         logger.info("Connected to Qdrant at %s", qdrant_url)
         return QdrantVectorStore(
             client,
@@ -466,7 +465,7 @@ async def create_vector_store(
 class RAGService:
     """
     Hybrid search engine with reciprocal rank fusion.
-    
+
     Combines vector and keyword search with configurable bias.
     """
 
@@ -511,7 +510,7 @@ class RAGService:
     ) -> list[ScoredDocument]:
         """
         Hybrid RRF with normalized weights.
-        
+
         Uses pure RRF ranking with optional bias for vector results.
         """
         # Normalize weights to sum to 1.0
@@ -558,13 +557,15 @@ class RAGService:
     ) -> list[ScoredDocument]:
         """
         Perform hybrid search combining vector and keyword methods.
-        
+
         Falls back to pure vector search if keyword search fails.
         """
-        validated = RetrieveContextRequest.model_validate({
-            "query": query,
-            "limit": limit,
-        })
+        validated = RetrieveContextRequest.model_validate(
+            {
+                "query": query,
+                "limit": limit,
+            }
+        )
 
         try:
             query_vector = await self._embedder.embed(validated.query)
@@ -577,9 +578,7 @@ class RAGService:
                     store.keyword_search(validated.query, candidate_limit),
                 )
             except QDRANT_CONNECTION_ERRORS:
-                logger.warning(
-                    "Qdrant connection lost; switching to MockVectorStore"
-                )
+                logger.warning("Qdrant connection lost; switching to MockVectorStore")
                 async with self._store_lock:
                     self._vector_store = MockVectorStore(embedder=self._embedder)
                 store = await self._get_store()
@@ -607,7 +606,7 @@ class RAGService:
     ) -> list[str]:
         """
         Retrieve relevant context documents for a query.
-        
+
         Args:
             query: User query
             limit: Maximum number of documents to return.
@@ -616,17 +615,19 @@ class RAGService:
         if limit is None:
             limit = self._config.default_retrieval_limit or 3
 
-        validated = RetrieveContextRequest.model_validate({
-            "query": query,
-            "limit": limit,
-        })
+        validated = RetrieveContextRequest.model_validate(
+            {
+                "query": query,
+                "limit": limit,
+            }
+        )
         results = await self.hybrid_search(validated.query, limit=validated.limit)
         return [result.content for result in results]
 
     async def health_check(self) -> dict[str, bool | str]:
         """
         Check health of vector store backend.
-        
+
         Returns status of the underlying store.
         """
         try:

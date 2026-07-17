@@ -5,7 +5,6 @@ from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from openai import AsyncOpenAI
 
 from app.config import get_settings
@@ -23,18 +22,18 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """
     Build shared, decoupled service singletons and store them on app.state.
-    
+
     Services are initialized once at startup and cleaned up on shutdown.
     """
     settings = get_settings()
-    
+
     # OpenAI client
     client = AsyncOpenAI(
         api_key=settings.openai_api_key,
         base_url=settings.openai_base_url,
         timeout=settings.request_timeout_seconds,
     )
-    
+
     # RAG configuration
     rag_config = RAGConfig(
         collection_name=settings.qdrant_collection,
@@ -43,12 +42,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         qdrant_url=settings.qdrant_url,
         qdrant_api_key=settings.qdrant_api_key,
     )
-    
+
     # Store services in app state
     app.state.settings = settings
     app.state.openai_client = client
     app.state.llm_service = LLMService(client)
-    
+
     # Agent orchestrator with mock lookup (replace with real implementation)
     app.state.agent_orchestrator = AgentOrchestrator(
         client,
@@ -56,7 +55,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         max_iterations=settings.agent_max_iterations,
         # fintech_lookup=real_fintech_lookup,  # <-- Add when ready
     )
-    
+
     # RAG service
     app.state.rag_service = RAGService(
         client=client,
@@ -65,7 +64,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
 
     logger.info("Application services initialized successfully")
-    
+
     try:
         yield
     finally:
@@ -78,14 +77,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app() -> FastAPI:
     """Application factory."""
     settings = get_settings()
-    
+
     app = FastAPI(
         title="Fintech Agent API",
         version="1.0.0",
         description="Streaming, tool-calling fintech agent with RAG capabilities",
         lifespan=lifespan,
     )
-    
+
     # CORS middleware
     app.add_middleware(
         CORSMiddleware,
@@ -94,7 +93,7 @@ def create_app() -> FastAPI:
         allow_methods=settings.cors_allow_methods,
         allow_headers=settings.cors_allow_headers,
     )
-    
+
     # Health check
     @app.get("/health", tags=["health"])
     async def health(request: Request) -> dict[str, Any]:
@@ -104,7 +103,7 @@ def create_app() -> FastAPI:
             "version": "1.0.0",
             "services": {},
         }
-        
+
         # Check RAG service
         try:
             rag = request.app.state.rag_service
@@ -113,7 +112,7 @@ def create_app() -> FastAPI:
         except Exception as e:
             status["services"]["rag"] = f"unhealthy: {str(e)}"
             status["status"] = "degraded"
-        
+
         # Check OpenAI
         try:
             _ = request.app.state.openai_client  # или просто проверяем наличие
@@ -121,12 +120,12 @@ def create_app() -> FastAPI:
         except Exception as e:
             status["services"]["openai"] = f"unhealthy: {str(e)}"
             status["status"] = "degraded"
-        
+
         return status
-    
+
     # Include routers
     app.include_router(agent_router.router)
-    
+
     return app
 
 

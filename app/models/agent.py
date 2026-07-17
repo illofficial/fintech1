@@ -14,7 +14,7 @@ FinishReason = Literal["stop", "length", "tool_calls", "content_filter", "functi
 class FintechTransactionQuery(BaseModel):
     """
     Validated arguments for the fintech database lookup tool.
-    
+
     Examples:
         >>> query = FintechTransactionQuery(
         ...     account_id="ACC123",
@@ -72,7 +72,7 @@ class FintechTransactionQuery(BaseModel):
 class TransactionRecord(BaseModel):
     """
     A single transaction row returned by the fintech lookup tool.
-    
+
     Examples:
         >>> tx = TransactionRecord(
         ...     id="TXN-1001",
@@ -137,7 +137,7 @@ class TransactionRecord(BaseModel):
 class UserRequest(BaseModel):
     """
     Inbound payload for the public `/v1/chat` endpoint.
-    
+
     Examples:
         >>> req = UserRequest(message="Show me my transactions for July 2026")
     """
@@ -154,7 +154,7 @@ class UserRequest(BaseModel):
 class AgentRequest(BaseModel):
     """
     Internal request model for the agent orchestrator.
-    
+
     Allows overriding system prompt and model per request.
     """
 
@@ -182,7 +182,7 @@ class AgentRequest(BaseModel):
 class AgentResponse(BaseModel):
     """
     Response from the agent orchestrator after completing the tool loop.
-    
+
     Contains the final answer and execution metadata.
     """
 
@@ -232,7 +232,7 @@ class ErrorResponse(BaseModel):
 class MaxIterationsExceededError(Exception):
     """
     Raised when the agent tool loop exceeds the allowed iteration limit.
-    
+
     This is a hard cap to prevent infinite loops and excessive token usage.
     """
 
@@ -250,7 +250,7 @@ class MaxIterationsExceededError(Exception):
 class RAGContext(BaseModel):
     """
     Retrieved context for RAG operations.
-    
+
     Used for debugging and monitoring retrieval quality.
     """
 

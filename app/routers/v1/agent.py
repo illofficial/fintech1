@@ -1,7 +1,8 @@
 import logging
 import time
 import uuid
-from typing import Annotated, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
@@ -100,11 +101,17 @@ async def chat(
             async for chunk in llm_service.stream_completion(context, model=agent.model):
                 # Ensure the client is still connected before yielding downstream token buffers
                 if await request.is_disconnected():
-                    logger.warning("Client disconnected early during token stream delivery loop", extra={"request_id": request_id})
+                    logger.warning(
+                        "Client disconnected early during token stream delivery loop",
+                        extra={"request_id": request_id},
+                    )
                     break
                 yield chunk
         except APIError:
-            logger.exception("Infrastructure failure mid-stream during token generation", extra={"request_id": request_id})
+            logger.exception(
+                "Infrastructure failure mid-stream during token generation",
+                extra={"request_id": request_id},
+            )
             raise
         finally:
             duration = time.monotonic() - start_time
