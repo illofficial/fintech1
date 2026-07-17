@@ -48,7 +48,9 @@ class FintechTransactionQuery(BaseModel):
         default=10,
         ge=1,
         le=MAX_TRANSACTIONS_PER_RESPONSE,
-        description=f"Maximum number of transactions to return (max: {MAX_TRANSACTIONS_PER_RESPONSE})",
+        description=(
+            f"Maximum number of transactions to return (max: {MAX_TRANSACTIONS_PER_RESPONSE})"
+        ),
     )
 
     @model_validator(mode="after")
